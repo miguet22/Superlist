@@ -76,6 +76,51 @@
       </div>
     </section>
 
+    <!-- Smart Suggestions & Microservice Architecture Demo Section -->
+    <section class="suggestions-card" id="suggestions-section">
+      <div class="suggestions-header">
+        <div class="suggestions-title-group">
+          <span class="suggestions-icon">💡</span>
+          <div>
+            <h3>Sugerencias Inteligentes & Insights</h3>
+            <p class="suggestions-subtitle">Módulo desacoplado de recomendaciones de compra</p>
+          </div>
+        </div>
+        <div class="suggestions-badge-group">
+          <span id="service-arch-badge" class="badge-pill badge-monolith" title="Modo de ejecución del módulo">
+            <span class="dot"></span>
+            <span id="service-arch-label">Detectando arquitectura...</span>
+          </span>
+          <span id="service-latency-badge" class="badge-pill badge-latency" title="Latencia del módulo">
+            ⏱️ <span id="service-latency-val">-- ms</span>
+          </span>
+        </div>
+      </div>
+
+      <!-- Degraded State Banner (visible when microservice is stopped) -->
+      <div id="suggestions-degraded-banner" class="degraded-banner hidden" role="alert">
+        <span class="degraded-icon">⚠️</span>
+        <div class="degraded-text">
+          <strong>Modo Degradado (Falla Parcial Tolerada):</strong>
+          <span id="degraded-banner-msg">El microservicio de sugerencias no responde, pero la lista principal sigue 100% operativa.</span>
+        </div>
+      </div>
+
+      <!-- Insights Tip -->
+      <div class="insights-summary" id="insights-summary">
+        <span class="tip-icon">✨</span>
+        <span id="insights-tip">Cargando sugerencias para tu lista...</span>
+      </div>
+
+      <!-- Suggestions Chips Container -->
+      <div class="suggestions-chips-wrapper">
+        <span class="chips-label">Sugeridos para agregar con 1 clic:</span>
+        <div id="suggestions-chips" class="suggestions-chips">
+          <!-- Dynamic suggestion chips inserted by JS -->
+        </div>
+      </div>
+    </section>
+
     <!-- Controls: Search & Filters -->
     <section class="controls-section">
       <div class="search-box">

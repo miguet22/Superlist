@@ -10,6 +10,11 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+try:
+    from backend import suggestions
+except ImportError:
+    import suggestions
+
 # ------------------------------------------------------------------------------
 # Configuración & Inicialización
 # ------------------------------------------------------------------------------
@@ -244,6 +249,17 @@ def clear_completed_items():
         "message": f"Se eliminaron {len(removed_ids)} productos completados de Redis",
         "removed_ids": removed_ids
     }
+
+@app.get("/api/suggestions", summary="Recomendaciones inteligentes de compra (Monolito vs Microservicio)")
+def get_suggestions_endpoint(force_mode: Optional[str] = None):
+    """
+    Retorna recomendaciones analizando la lista de productos actual.
+    Soporta ejecución en Monolito Modular (en memoria) o Microservicio (:8001).
+    Demuestra latencia, desacoplamiento y degradación elegante ante caídas.
+    """
+    items = get_all_items()
+    service_url = os.getenv("SUGGESTIONS_SERVICE_URL", None)
+    return suggestions.get_suggestions(items, service_url=service_url, force_mode=force_mode)
 
 @app.get("/api/redis/stats", summary="Visualizar variables y estado interno de Redis")
 def get_redis_stats():

@@ -75,6 +75,15 @@ const redisKeysCount = document.getElementById('redis-keys-count');
 const redisMemoryUsed = document.getElementById('redis-memory-used');
 const redisKeysContainer = document.getElementById('redis-keys-container');
 
+// Suggestions DOM Elements
+const serviceArchBadge = document.getElementById('service-arch-badge');
+const serviceArchLabel = document.getElementById('service-arch-label');
+const serviceLatencyVal = document.getElementById('service-latency-val');
+const suggestionsDegradedBanner = document.getElementById('suggestions-degraded-banner');
+const degradedBannerMsg = document.getElementById('degraded-banner-msg');
+const insightsTip = document.getElementById('insights-tip');
+const suggestionsChipsContainer = document.getElementById('suggestions-chips');
+
 // --- Initialization ---
 async function initApp() {
   setupEventListeners();
@@ -154,6 +163,7 @@ async function loadItems() {
     hasLoadedItems = true;
     setConnectionState(true);
     render();
+    loadSuggestions();
   } catch {
     setConnectionState(false);
   }
@@ -176,6 +186,7 @@ async function mutateItems(path, options, onSuccess) {
   } finally {
     isSaving = false;
     render();
+    loadSuggestions();
   }
 }
 
@@ -307,6 +318,97 @@ async function loadRedisStats() {
       </div>
     `;
   }
+}
+
+// --- Smart Suggestions & Microservices Architecture Logic ---
+async function loadSuggestions() {
+  if (typeof window === 'undefined' || !isOnlineWithBackend) return;
+  try {
+    const data = await apiRequest('/suggestions');
+    if (data && typeof data === 'object') {
+      renderSuggestions(data);
+    }
+  } catch (err) {
+    renderSuggestionsDegraded(err);
+  }
+}
+
+function renderSuggestions(data) {
+  if (!serviceArchBadge || !suggestionsChipsContainer) return;
+
+  const isDegraded = data.status === 'degraded' || data.degraded === true;
+  const isMicroservice = data.mode === 'microservice';
+
+  if (isDegraded) {
+    serviceArchBadge.className = 'badge-pill badge-degraded';
+    if (serviceArchLabel) serviceArchLabel.textContent = 'Microservicio Degradado ⚠️';
+    if (suggestionsDegradedBanner) {
+      suggestionsDegradedBanner.classList.remove('hidden');
+      if (degradedBannerMsg && data.error_detail) {
+        degradedBannerMsg.textContent = `${data.error_detail}. La lista principal sigue funcionando normalmente.`;
+      }
+    }
+  } else if (isMicroservice) {
+    serviceArchBadge.className = 'badge-pill badge-microservice';
+    if (serviceArchLabel) serviceArchLabel.textContent = 'Microservicio Online (:8001)';
+    if (suggestionsDegradedBanner) suggestionsDegradedBanner.classList.add('hidden');
+  } else {
+    serviceArchBadge.className = 'badge-pill badge-monolith';
+    if (serviceArchLabel) serviceArchLabel.textContent = 'Monolito Modular (en memoria)';
+    if (suggestionsDegradedBanner) suggestionsDegradedBanner.classList.add('hidden');
+  }
+
+  if (serviceLatencyVal && typeof data.latency_ms !== 'undefined') {
+    serviceLatencyVal.textContent = `${data.latency_ms} ms`;
+  }
+
+  if (insightsTip && data.insights && data.insights.tip) {
+    insightsTip.textContent = data.insights.tip;
+  }
+
+  suggestionsChipsContainer.innerHTML = '';
+  const suggestionsList = Array.isArray(data.suggestions) ? data.suggestions : [];
+  suggestionsList.forEach(sug => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'suggestion-chip';
+    chip.title = `${sug.reason || 'Sugerencia'} (${sug.quantity || '1 un'})`;
+    chip.innerHTML = `<span>➕</span> <strong>${escapeHTML(sug.name)}</strong> <span class="chip-reason">${escapeHTML(sug.reason || '')}</span>`;
+    chip.addEventListener('click', () => {
+      quickAddProduct(sug.name, sug.category || 'otros', sug.quantity || '1 un', sug.reason || '');
+    });
+    suggestionsChipsContainer.appendChild(chip);
+  });
+}
+
+function renderSuggestionsDegraded(err) {
+  if (serviceArchBadge) {
+    serviceArchBadge.className = 'badge-pill badge-degraded';
+    if (serviceArchLabel) serviceArchLabel.textContent = 'Microservicio Offline ⚠️';
+  }
+  if (suggestionsDegradedBanner) {
+    suggestionsDegradedBanner.classList.remove('hidden');
+  }
+  if (insightsTip) {
+    insightsTip.textContent = 'El servicio de sugerencias no responde. La lista de compras permanece operativa.';
+  }
+}
+
+async function quickAddProduct(name, category, qty, note) {
+  if (!isOnlineWithBackend || isSaving || isSyncing) return;
+  await mutateItems('/items', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: name.trim(),
+      category: category,
+      quantity: qty || '1 un',
+      note: note || ''
+    })
+  }, (newItem) => {
+    items.unshift(newItem);
+    showToast(`"${newItem.name}" agregado desde sugerencias`, 'success');
+  });
 }
 
 // --- Event Listeners Setup ---

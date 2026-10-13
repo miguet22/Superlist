@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir --only-binary :all: -r requirements.txt
 
-COPY main.py .
+COPY main.py suggestions.py ./
 
 ARG APP_VERSION=local
 ENV APP_VERSION=$APP_VERSION

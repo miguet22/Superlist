@@ -182,3 +182,58 @@ def test_identify_api_node_middleware():
         assert "X-API-Node" in response.headers
 
 
+def test_suggestions_monolith_empty():
+    res = main.suggestions.get_suggestions([], force_mode="monolith")
+    assert res["mode"] == "monolith"
+    assert res["status"] == "online"
+    assert res["degraded"] is False
+    assert len(res["suggestions"]) > 0
+
+
+def test_suggestions_monolith_associations():
+    items = [{"name": "Fideos Tallarines", "category": "despensa"}]
+    res = main.suggestions.get_suggestions(items, force_mode="monolith")
+    names = [s["name"] for s in res["suggestions"]]
+    assert "Salsa de Tomate" in names or "Queso Rallado" in names
+
+
+def test_suggestions_microservice_success(monkeypatch):
+    mock_response = Mock()
+    mock_response.read.return_value = json.dumps({
+        "suggestions": [{"name": "Queso", "category": "lacteos", "quantity": "1", "reason": "test"}],
+        "insights": {"item_count": 1, "categories_present": ["despensa"], "tip": "test tip"}
+    }).encode("utf-8")
+    mock_response.__enter__ = Mock(return_value=mock_response)
+    mock_response.__exit__ = Mock(return_value=None)
+
+    monkeypatch.setattr(main.suggestions.urllib.request, "urlopen", Mock(return_value=mock_response))
+    res = main.suggestions.get_suggestions([], service_url="http://mock:8001/api/suggestions")
+    assert res["mode"] == "microservice"
+    assert res["status"] == "online"
+    assert res["degraded"] is False
+    assert res["suggestions"][0]["name"] == "Queso"
+
+
+def test_suggestions_microservice_graceful_degradation(monkeypatch):
+    monkeypatch.setattr(
+        main.suggestions.urllib.request,
+        "urlopen",
+        Mock(side_effect=Exception("Connection refused"))
+    )
+    res = main.suggestions.get_suggestions([], service_url="http://mock:8001/api/suggestions")
+    assert res["mode"] == "microservice"
+    assert res["status"] == "degraded"
+    assert res["degraded"] is True
+    assert "Fallo al conectar" in res["error_detail"]
+    assert len(res["suggestions"]) > 0
+
+
+def test_suggestions_endpoint():
+    with TestClient(main.app) as client:
+        res = client.get("/api/suggestions?force_mode=monolith")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["mode"] == "monolith"
+        assert "suggestions" in data
+
+

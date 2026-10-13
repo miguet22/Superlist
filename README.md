@@ -4,13 +4,21 @@
 [![Valoración SAST Python](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmiguet22%2FTPI1_DEVOPS%2Fci-badges%2Factions.json)](https://github.com/miguet22/TPI1_DEVOPS/actions/workflows/ci.yml?query=branch%3Aactions)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=miguet22_TPI1_DEVOPS&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=miguet22_TPI1_DEVOPS)
 
-Trabajo Práctico N.º 1 de DevOps, UTN FRRe, 2026.
+Trabajo Práctico N.º 1 de DevOps — UTN FRRe, 2026.
 
-SuperList es una lista de compras que usamos para probar la integración entre una aplicación web, una API REST y Redis. Permite agregar productos, marcarlos como comprados, volverlos a dejar pendientes y eliminarlos. La web nunca accede directamente a Redis: todas las operaciones pasan por la API.
+Este documento está organizado en dos grandes partes para facilitar la defensa y explicación durante el coloquio:
+* **[PARTE 1: ARQUITECTURA BASE (Lo que se tenía hasta ahora)](#parte-1-arquitectura-base-lo-que-se-tenía-hasta-ahora):** Aplicación de lista de compras, réplicas, balanceo con Nginx, persistencia en Redis, CI/CD, SAST y despliegue cloud.
+* **[PARTE 2: EXTENSIÓN TEMA 1 — MONOLITO MODULAR Y MICROSERVICIOS (Lo nuevo para el Coloquio)](#parte-2-extensión-tema-1--monolito-modular-y-microservicios):** Justificación teórica del "por qué", comparación de arquitectura, costos introducidos, degradación elegante y guión práctico paso a paso de la demo.
 
-## Arquitectura
+---
 
-El entorno local se levanta completo con Docker Compose:
+# PARTE 1: ARQUITECTURA BASE (Lo que se tenía hasta ahora)
+
+SuperList es una lista de compras que integra una aplicación web, una API REST en FastAPI y una base de datos en Redis. Permite agregar productos, marcarlos como comprados, volverlos a dejar pendientes y eliminarlos. La web nunca accede directamente a Redis: todas las operaciones pasan por la API.
+
+## Arquitectura Base
+
+El entorno local original se levanta con Docker Compose con alta disponibilidad y réplicas:
 
 ```text
                          ┌─ frontend
@@ -26,11 +34,10 @@ Navegador ──> Nginx ─────┼─ frontend2
 Nginx funciona como proxy reverso y distribuye las solicitudes entre tres instancias de la web y tres de la API. Las API comparten el mismo Redis, por lo que cualquier réplica puede consultar o modificar la lista. Redis está en una red interna y tiene un volumen para conservar los datos cuando se recrean los contenedores.
 
 Solo el proxy publica un puerto en el host. La comunicación queda separada en dos redes:
+* `web`: proxy, aplicaciones web y API.
+* `data`: API y Redis. Esta red es interna.
 
-- `web`: proxy, aplicaciones web y API.
-- `data`: API y Redis. Esta red es interna.
-
-## Ejecución local
+## Ejecución Local Base
 
 Se necesita Docker con Docker Compose y el motor iniciado.
 
@@ -49,38 +56,33 @@ docker compose down
 
 `docker compose down` conserva el volumen de Redis. La opción `-v` también elimina ese volumen y, por lo tanto, los productos guardados.
 
-## Prueba durante el coloquio
+## Prueba Original de Balanceo y Failover
 
-Una forma corta de mostrar el funcionamiento completo es:
+Una forma corta de comprobar la tolerancia a caídas de réplicas en la arquitectura base:
 
 1. Agregar un producto desde la web, marcarlo como comprado y eliminarlo.
 2. Abrir **Visor Redis** para comprobar que la información fue guardada por la API en `superlist:items`.
-3. Hacer varias solicitudes y observar `X-Upstream-Addr` y `X-API-Node` en las cabeceras de respuesta. Estas cabeceras permiten identificar el nodo que atendió cada petición.
+3. Hacer varias solicitudes y observar `X-Upstream-Addr` y `X-API-Node` en las cabeceras de respuesta.
 4. Detener una réplica web y una réplica de API:
 
    ```powershell
    docker compose stop frontend backend
    ```
 
-5. Repetir las operaciones desde la web. Las otras réplicas deben seguir respondiendo.
+5. Repetir las operaciones desde la web. Las otras réplicas continúan respondiendo.
 6. Restaurar las instancias detenidas:
 
    ```powershell
    docker compose start --wait frontend backend
    ```
 
-Las cabeceras también se pueden consultar desde PowerShell:
+Las cabeceras también se pueden consultar desde PowerShell con el script existente:
 
 ```powershell
-1..9 | ForEach-Object {
-    (Invoke-WebRequest -UseBasicParsing http://localhost:8080/).Headers['X-Upstream-Addr']
-    (Invoke-WebRequest -UseBasicParsing http://localhost:8080/api/health).Headers['X-API-Node']
-}
+powershell -File scripts/demo-failover.ps1
 ```
 
-La tolerancia a fallos solicitada cubre la caída de una instancia web o API. El proxy y Redis son instancias únicas en el entorno local.
-
-## Servicios
+## Servicios Base
 
 | Servicio | Tecnología | Cantidad local | Función |
 | --- | --- | ---: | --- |
@@ -89,9 +91,7 @@ La tolerancia a fallos solicitada cubre la caída de una instancia web o API. El
 | API | FastAPI y Uvicorn | 3 | Reglas de la aplicación y acceso exclusivo a Redis |
 | Datos | Redis 7 | 1 | Almacenamiento de productos y estado de compra |
 
-La interfaz conserva en memoria la última lista recibida si todas las API dejan de responder, pero deshabilita las modificaciones. Cuando se recupera la conexión vuelve a cargar los datos desde Redis. No usa `localStorage` para persistir productos.
-
-## API
+## Endpoints Base de la API
 
 | Método | Ruta | Uso |
 | --- | --- | --- |
@@ -103,102 +103,196 @@ La interfaz conserva en memoria la última lista recibida si todas las API dejan
 | `DELETE` | `/api/items/completed/clear` | Eliminar los productos comprados |
 | `GET` | `/api/redis/stats` | Consultar claves, tipos y datos para el visor de Redis |
 
-Los productos se almacenan en el hash `superlist:items`. La API usa `HGETALL`, `HSET` y `HDEL` para recuperar, guardar y eliminar información.
+## Integración Continua y Despliegue en la Nube
 
-## Integración continua
+El workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) incluye:
+* Tests unitarios con `pytest` y `fakeredis`.
+* Tests de disponibilidad del frontend con el runner de Node.js.
+* Análisis SAST del backend con Bandit (valoración A sin hallazgos).
+* Quality Gate de SonarCloud.
+* Publicación automatizada de imágenes en Docker Hub (`cazm0/superlist-frontend` y `cazm0/superlist-backend`).
+* Despliegue automático en Render con notificación en Discord.
 
-El workflow [ci.yml](.github/workflows/ci.yml) se ejecuta con cada push, pull request o ejecución manual. Incluye:
+---
 
-- tests de la API con `pytest` y `fakeredis`;
-- tests del frontend con el runner de Node.js;
-- cobertura de Python y JavaScript;
-- análisis SAST del backend con Bandit;
-- análisis de Python y JavaScript con SonarCloud y espera del Quality Gate (hasta 300 segundos); `SONAR_TOKEN` es obligatorio en `main` y, si falta, el job falla;
-- publicación del resultado de SAST para el badge;
-- notificación opcional a Discord mediante `DISCORD_WEBHOOK_URL`.
+# PARTE 2: EXTENSIÓN TEMA 1 — MONOLITO MODULAR Y MICROSERVICIOS
 
-Discord espera el resultado de publicación y despliegue. Solo anuncia **DESPLIEGUE EXITOSO EN RENDER** cuando verifica, durante un máximo de 10 minutos, que frontend y API sirven el SHA del commit publicado, que la web responde y que la API conecta con Redis real tanto directamente como a través del frontend. El mensaje incluye enlaces a la web, la API y su documentación. Si faltan hooks, falla un control o no aparece la versión esperada, informa que el despliegue no fue confirmado.
+> **Tema Asignado:** Tema 1 — Arquitectura: Monolito modular y microservicios.  
+> **Pregunta Guía:** *¿Cuándo conviene separar un módulo como servicio y qué costo introduce?*  
+> **Demo Práctica:** *Ejecutar dos módulos juntos y luego separar uno detrás de una API, provocar su caída para observar el impacto.*
 
-Para disparar ambos servicios deben estar configurados `RENDER_DEPLOY_HOOK_BACKEND` y `RENDER_DEPLOY_HOOK_FRONTEND` como secretos de GitHub Actions. Las imágenes reciben `APP_VERSION` durante el build; el frontend expone esa versión en `/version.txt` y la API en `/api/health`.
+---
 
-La valoración propia de Bandit es la siguiente:
+## 1. El "Por Qué" de Todo (Fundamentación Teórica y Arquitectural)
 
-| Valoración | Resultado |
-| --- | --- |
-| A | Sin hallazgos |
-| B | Hallazgos de severidad baja |
-| C | Hallazgos medios; el CI falla |
-| D | Hallazgos altos; el CI falla |
+### A. Definición de los Dos Módulos
+Para cumplir con la consigna, la solución descompone el negocio en dos dominios bien delimitados:
 
-Para ejecutar los controles principales en una máquina con Python y Node.js:
+1. **Módulo Core (Gestión de Compras):**
+   * Responsabilidad: Alta, baja, modificación y estado de compra de los productos en Redis.
+   * Requisito: **Crítico**. Si este módulo falla, el usuario no puede usar la aplicación.
+2. **Módulo Auxiliar (Recomendaciones e Insights de Canasta):**
+   * Responsabilidad: Analiza la canasta actual y genera sugerencias inteligentes de compra complementarias (ej. si hay fideos, sugiere salsa de tomate y queso; si hay café, sugiere azúcar o leche) y consejos de nutrición/variedad.
+   * Requisito: **Secundario/No bloqueante**. Si este módulo falla, el usuario **aún debe poder comprar normalmente**.
+
+---
+
+### B. Respuesta a la Pregunta Guía
+
+#### ¿Cuándo conviene separar un módulo como servicio?
+Conviene extraer un módulo fuera del monolito hacia su propio microservicio cuando se presentan uno o varios de los siguientes factores:
+
+1. **Escalabilidad Asimétrica:**
+   * El cálculo de sugerencias, analítica o IA puede requerir intensivo uso de CPU o memoria en comparación con las operaciones de lectura/escritura de la lista. En un microservicio, podemos escalar a 10 réplicas el servicio de sugerencias sin malgastar recursos en el core.
+2. **Aislamiento de Fallos (*Fault Isolation*):**
+   * Si el motor de sugerencias experimenta un error crítico, bloqueo o fuga de memoria, **no debe voltear el proceso de la lista de compras**. El core sigue funcionando.
+3. **Ciclos de Despliegue y Autonomía de Equipos:**
+   * Un equipo especializado en analítica/IA puede modificar, testear y desplegar nuevas reglas o algoritmos de recomendación todos los días sin necesidad de recompilar ni redesplegar la API core.
+4. **Heterogeneidad Tecnológica:**
+   * Permite que el nuevo servicio utilice librerías o runtimes específicos (ej. Python para machine learning, Go para alta concurrencia) independientemente de la tecnología del core.
+
+#### ¿Qué costos introduce la separación?
+Separar un módulo introduce costos técnicos y operativos reales que deben justificarse:
+
+1. **Latencia de Red y Serialización (El costo de la llamada):**
+   * En el monolito modular, la llamada es una invocación a una función en memoria (nanosegundos o < 0.1 ms).
+   * En el microservicio, la llamada viaja por la red (HTTP/REST o gRPC) requiriendo serialización/deserialización JSON, socket TCP y resolución DNS (2 ms a 15 ms).
+2. **Riesgo de Fallas en Cascada (*Cascading Failures*):**
+   * En un sistema distribuido, la red es intrínsecamente no confiable. Si el backend core espera sincrónicamente al microservicio sin timeout ni manejo de errores, la caída del microservicio arrastra consigo al backend (HTTP 500 para todo el usuario).
+3. **Complejidad de Resiliencia (*Graceful Degradation*):**
+   * Obliga a implementar patrones de resiliencia: timeouts estrictos, reintentos y *fallbacks* (degradación elegante) para que la caída parcial sea transparente o tolerada.
+4. **Sobrecarga Operativa y DevOps:**
+   * Más imágenes Docker a construir y mantener, más puertos, configuración de service discovery, orquestación en `compose.yaml`, monitoreo distribuido y trazas.
+
+---
+
+## 2. Arquitectura de la Extensión
+
+```text
+                             ┌─ frontend (x3)
+Navegador ──> Nginx (:8080) ─┼─ backend  (x3) ──> Redis (:6379)
+                             │      │
+                             │      │ (Llamada HTTP REST interna / POST :8001)
+                             │      ▼
+                             └─ suggestions-service (:8001) [Microservicio Desacoplado]
+```
+
+### Los Dos Modos Soportados por el Sistema:
+
+1. **Modo Monolito Modular (`force_mode=monolith` o sin URL externa):**
+   * La API resuelve las recomendaciones mediante el módulo interno `backend/suggestions.py` directamente en memoria dentro del mismo proceso.
+   * Latencia observada: **< 0.2 ms**.
+2. **Modo Microservicio Desacoplado (`SUGGESTIONS_SERVICE_URL=http://suggestions:8001/api/suggestions`):**
+   * El servicio independiente corre en el contenedor `suggestions` (puerto 8001).
+   * La API core realiza una petición HTTP al microservicio con un **timeout estricto de 1.5s**.
+   * Latencia observada: **~2 - 5 ms**.
+
+### Patrón de Resiliencia: Degradación Elegante (*Graceful Degradation*)
+
+Cuando el microservicio de sugerencias se detiene intencionalmente:
+* La llamada HTTP falla (conexión rechazada o timeout).
+* El backend **NO arroja HTTP 500**. Captura la excepción, marca la respuesta como `"status": "degraded"`, `"degraded": true`, y sirve sugerencias de respaldo en caché local.
+* La interfaz web muestra un badge ámbar ⚠️ indicando **Modo Degradado (Falla Parcial Tolerada)**.
+* **El usuario puede continuar agregando, marcando y borrando productos sin interrupciones**.
+
+---
+
+## 3. Guía Paso a Paso para la Defensa en el Coloquio
+
+Durante la presentación ante los profesores, podés seguir este guión exacto:
+
+### Paso 1: Levantar el entorno y mostrar ambos módulos activos
+
+1. Iniciar los contenedores:
+   ```powershell
+   docker compose up -d --build --wait
+   ```
+2. Abrir el navegador en [http://localhost:8080](http://localhost:8080).
+3. **Explicación al docente:**
+   * *"Acá vemos la aplicación con sus dos módulos: el módulo Core de la lista y la tarjeta superior de **Sugerencias Inteligentes & Insights**."*
+   * *"Observen el badge verde: indica **Microservicio Online (:8001)** y muestra la latencia de red (aprox 2-4 ms), que evidencia el costo de serialización y transporte HTTP entre contenedores."*
+   * *"Si hacemos clic en una sugerencia (+ Salsa de Tomate), se agrega inmediatamente a la lista."*
+
+---
+
+### Paso 2: Mostrar el contraste con el Monolito Modular
+
+1. Consultar el endpoint forzando la ejecución en memoria:
+   ```powershell
+   Invoke-RestMethod "http://localhost:8080/api/suggestions?force_mode=monolith"
+   ```
+2. **Explicación al docente:**
+   * *"Cuando ejecutamos ambos módulos juntos como **Monolito Modular** en el mismo proceso, la latencia cae a menos de 0.2 ms porque no hay salto de red ni serialización. Esta es la gran ventaja del monolito cuando no hay necesidad de escalar componentes por separado."*
+
+---
+
+### Paso 3: Provocar la caída del microservicio y observar el impacto
+
+1. En la terminal, detener el microservicio auxiliar:
+   ```powershell
+   docker compose stop suggestions
+   ```
+2. Volver al navegador o recargar la página:
+   * La tarjeta de sugerencias cambia automáticamente a badge rojo/ámbar: **Microservicio Degradado ⚠️**.
+   * Aparece el banner informativo: *"El microservicio de sugerencias no responde, pero la lista principal sigue 100% operativa."*
+3. Agregar o eliminar un producto de la lista (ej. agregar "Arroz"):
+   * La operación se completa inmediatamente en Redis con 200 OK.
+4. **Explicación al docente (Momento Clave):**
+   * *"Aquí estamos demostrando el objetivo central del tema: **Aislamiento de fallos y prevención de fallas en cascada**."*
+   * *"Al haber separado el módulo detrás de una API, su caída no provocó un fallo general del sistema. Gracias a la **Degradación Elegante**, el usuario puede seguir comprando sin notar que un servicio secundario está caído."*
+
+---
+
+### Paso 4: Restaurar el microservicio (Self-Healing / Recuperación)
+
+1. Volver a iniciar el microservicio:
+   ```powershell
+   docker compose start suggestions
+   ```
+2. En 3 segundos, recargar o esperar el ciclo de sondeo:
+   * El badge vuelve a verde: **Microservicio Online (:8001)**.
+   * La aplicación se recuperó de forma automática sin haber requerido reiniciar la API core ni el proxy.
+
+---
+
+### Demostración Automatizada en un Solo Comando
+
+Para ejecutar toda la secuencia de forma automatizada por consola y mostrar las métricas en pantalla:
 
 ```powershell
-python -m pip install -r requirements-dev.txt
-python -m pytest -q
-node --test tests/test_frontend.cjs
-python -m bandit -r backend
+powershell -File scripts/demo-microservices.ps1
 ```
 
-## Imágenes en Docker Hub
+Este script ejecuta automáticamente:
+1. Consulta en modo Monolito Modular y muestra latencia en memoria.
+2. Consulta en modo Microservicio y muestra latencia HTTP.
+3. Ejecuta `docker compose stop suggestions` y comprueba que `/api/items` sigue vivo mientras `/api/suggestions` entra en modo degradado con código 200.
+4. Ejecuta `docker compose start suggestions` y confirma la recuperación del servicio.
 
-Solo en pushes o ejecuciones manuales sobre `main`, el job `publish-docker` construye y publica las imágenes del frontend y del backend después de aprobar los tests, el SAST y el Quality Gate de SonarCloud. Si el análisis falla, el Quality Gate es rechazado o vence el tiempo de espera, no se publican imágenes ni se disparan los despliegues. Para habilitarlo se configuran estos secretos en GitHub Actions:
+---
 
-- `DOCKERHUB_USERNAME`: usuario de Docker Hub (`cazm0`).
-- `DOCKERHUB_TOKEN`: token de acceso con permiso de escritura.
+## 4. Matriz Comparativa Resumen
 
-Las imágenes se publican en los repositorios:
+| Criterio | Monolito Modular | Microservicio Desacoplado | Microservicio Caído (Tolerancia) |
+| --- | --- | --- | --- |
+| **Ubicación de ejecución** | Mismo proceso (`backend`) | Contenedor separado (`suggestions:8001`) | Contenedor apagado |
+| **Tipo de llamada** | In-process (función en RAM) | Red interna HTTP REST (`urllib`) | Intento HTTP con Timeout (1.5s) |
+| **Latencia promedio** | **~0.1 ms** (Casi nula) | **~3.0 ms** (Costo de red + JSON) | **~15 ms** (Tiempo de fallo controlado) |
+| **Impacto de una falla** | Riesgo de arrastrar todo el proceso | Aislado en su propio contenedor | **Degradación Elegante** (Core sigue 200 OK) |
+| **Despliegue** | Unificado (todo o nada) | Independiente | N/A |
+| **Complejidad DevOps** | Baja (1 solo backend) | Media (Más servicios en Compose) | Requiere Circuit Breaker / Fallback |
 
-- **Frontend:** [hub.docker.com/r/cazm0/superlist-frontend](https://hub.docker.com/r/cazm0/superlist-frontend)
-- **Backend:** [hub.docker.com/r/cazm0/superlist-backend](https://hub.docker.com/r/cazm0/superlist-backend)
+---
 
-Se etiquetan como:
+## 5. Nuevos Archivos del Proyecto
 
 ```text
-cazm0/superlist-frontend:latest
-cazm0/superlist-frontend:<sha-del-commit>
-cazm0/superlist-backend:latest
-cazm0/superlist-backend:<sha-del-commit>
+suggestions_service/
+  ├── Dockerfile               Imagen Docker del microservicio independiente
+  ├── main.py                  FastAPI del microservicio en puerto 8001
+  └── requirements.txt         Dependencias específicas del microservicio
+backend/
+  └── suggestions.py           Módulo de recomendaciones y cliente con degradación elegante
+scripts/
+  └── demo-microservices.ps1   Script interactivo de PowerShell para el coloquio
 ```
-
-La etiqueta con el SHA permite saber exactamente qué versión se publicó. En pull requests y otras ramas se ejecutan los controles, pero no se publican imágenes ni se disparan los hooks de Render. Fuera de `main`, si no está disponible `SONAR_TOKEN`, el análisis de SonarCloud se omite con un aviso.
-
-## Despliegue en la nube
-
-La aplicación está desplegada en Render utilizando las imágenes publicadas en Docker Hub y almacenamiento persistente en Render Key-Value (Redis):
-
-- **Frontend (Web):** [https://superlist-frontend-latest.onrender.com](https://superlist-frontend-latest.onrender.com)
-- **Backend (API):** [https://superlist-backend-latest.onrender.com](https://superlist-backend-latest.onrender.com)
-- **Documentación API:** [https://superlist-backend-latest.onrender.com/docs](https://superlist-backend-latest.onrender.com/docs)
-- **Base de datos:** Render Key-Value (Redis administrado)
-- **Registro de imágenes:**
-  - Frontend: [cazm0/superlist-frontend](https://hub.docker.com/r/cazm0/superlist-frontend)
-  - Backend: [cazm0/superlist-backend](https://hub.docker.com/r/cazm0/superlist-backend)
-
-Variables configuradas en los servicios:
-
-| Servicio | Variable | Valor |
-| --- | --- | --- |
-| Backend | `REDIS_URL` | URL de conexión interna de Render Key-Value (`redis://...`) |
-| Frontend | `BACKEND_URL` | `https://superlist-backend-latest.onrender.com` |
-
-## Organización del repositorio
-
-```text
-backend/                 API, dependencias e imagen Docker
-css/ y js/               interfaz web
-nginx/default.conf       servidor del frontend y proxy hacia la API cloud
-nginx/proxy.conf         balanceador del entorno local
-scripts/                 cálculo SAST y demostración de tolerancia a fallos
-tests/                   tests de API, frontend y valoración SAST
-.github/workflows/ci.yml integración continua y publicación de imágenes
-compose.yaml             arquitectura local completa
-Dockerfile.frontend      imagen de la aplicación web
-```
-
-## Resultados, dificultades y mejoras
-
-El entorno local integra los tres módulos solicitados y permite observar los datos reales de Redis desde la interfaz. Las tres réplicas web y API comparten estado y la aplicación continúa disponible cuando se detiene una de ellas.
-
-Durante el armado fue necesario resolver el descubrimiento de servicios cuando Docker recrea contenedores, agregar healthchecks para ordenar el arranque y separar el estado confirmado por Redis del estado que el navegador conserva en memoria. También se mantuvieron las credenciales de Docker Hub, SonarCloud, Discord y Render fuera del repositorio mediante secretos de GitHub.
-
-Como mejoras futuras quedan la alta disponibilidad de Redis y del proxy, autenticación de usuarios, pruebas end-to-end en navegador y réplicas de la aplicación en cloud.
